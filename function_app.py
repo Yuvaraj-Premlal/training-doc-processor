@@ -34,17 +34,16 @@ from azure.storage.blob import (
     generate_blob_sas,
 )
 
-import video_indexer   as vi
-import openai_client   as oai
+import video_indexer    as vi
+import openai_client    as oai
 import document_builder as db
-import notifier
 
 logger = logging.getLogger(__name__)
 app    = func.FunctionApp()
 
 # ── Config ────────────────────────────────────────────────────────────────────
-CONN_STR      = os.environ["STORAGE_CONNECTION_STRING"]
-ACCOUNT_NAME  = os.environ["STORAGE_ACCOUNT_NAME"]
+CONN_STR      = os.environ.get("STORAGE_CONNECTION_STRING", "")
+ACCOUNT_NAME  = os.environ.get("STORAGE_ACCOUNT_NAME", "trainingdocstore")
 VIDEOS_CONT   = "videos"
 OUTPUTS_CONT  = "outputs"
 INTER_CONT    = "intermediate"
