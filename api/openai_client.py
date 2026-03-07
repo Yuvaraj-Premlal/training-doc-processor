@@ -33,15 +33,17 @@ def _chat(messages: list, max_tokens: int = 1500, json_mode: bool = False) -> st
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=10))
 def caption_keyframe(image_url: str, timestamp: float) -> dict:
-    minutes   = int(timestamp // 60)
-    seconds   = int(timestamp % 60)
+    minutes    = int(timestamp // 60)
+    seconds    = int(timestamp % 60)
     time_label = f"{minutes:02d}:{seconds:02d}"
     messages = [
         {
             "role": "system",
             "content": (
-                "You are analyzing screenshots from a software UI training video. "
-                "For each frame describe what is shown and rate its usefulness. "
+                "You are analyzing screenshots from a training video. "
+                "The video may contain slides, diagrams, UI screens, or whiteboard content. "
+                "For each frame describe what is shown and rate its usefulness as a training screenshot. "
+                "Be generous with scores — even a slide with text is useful (score 3+). "
                 "Respond only in JSON."
             ),
         },
@@ -56,10 +58,10 @@ def caption_keyframe(image_url: str, timestamp: float) -> dict:
                         "Respond with JSON:\n"
                         "{\n"
                         '  "caption": "One sentence describing what is shown",\n'
-                        '  "ui_element": "What UI screen or feature is visible",\n'
-                        '  "user_action": "What the user appears to be doing or null",\n'
-                        '  "score": <1-5 where 5=very useful training screenshot>,\n'
-                        '  "is_useful": <true if score >= 3>\n'
+                        '  "ui_element": "What screen, slide, or content is visible",\n'
+                        '  "user_action": "What is being demonstrated or explained, or null",\n'
+                        '  "score": <1-5 where 5=very useful, 3=useful slide or diagram, 1=blank/transitional>,\n'
+                        '  "is_useful": <true if score >= 2>\n'
                         "}"
                     ),
                 },
@@ -74,8 +76,15 @@ def caption_keyframe(image_url: str, timestamp: float) -> dict:
         return result
     except Exception as e:
         logger.warning(f"Vision caption failed at {time_label}: {e}")
-        return {"caption": f"Screenshot at {time_label}", "ui_element": "", "user_action": None,
-                "score": 2, "is_useful": False, "timestamp": timestamp, "url": image_url}
+        return {
+            "caption":    f"Screenshot at {time_label}",
+            "ui_element": "",
+            "user_action": None,
+            "score":      2,
+            "is_useful":  True,   # default to useful if caption fails
+            "timestamp":  timestamp,
+            "url":        image_url,
+        }
 
 
 def caption_all_keyframes(keyframes: list) -> list:
@@ -87,14 +96,19 @@ def caption_all_keyframes(keyframes: list) -> list:
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=10))
-def build_document_structure(transcript_segments: list, captioned_frames: list, topics: list, video_name: str) -> dict:
+def build_document_structure(
+    transcript_segments: list,
+    captioned_frames: list,
+    topics: list,
+    video_name: str,
+) -> dict:
     transcript_text = "\n".join(
         [f"[{int(s['start']//60):02d}:{int(s['start']%60):02d}] {s['text']}"
          for s in transcript_segments[:300]]
     )
     frames_summary = "\n".join([
         f"[{int(f['timestamp']//60):02d}:{int(f['timestamp']%60):02d}] "
-        f"Score:{f['score']} | {f['caption']} | UI: {f.get('ui_element','')}"
+        f"Score:{f.get('score',2)} | {f.get('caption','')} | UI: {f.get('ui_element','')}"
         for f in captioned_frames
     ])
     topics_text = "\n".join([
@@ -106,7 +120,7 @@ def build_document_structure(transcript_segments: list, captioned_frames: list, 
             "role": "system",
             "content": (
                 "You are an expert technical writer creating step-by-step training manuals "
-                "from software UI walkthrough videos."
+                "from video recordings. Match each section to the most relevant screenshot timestamp."
             ),
         },
         {
@@ -114,9 +128,10 @@ def build_document_structure(transcript_segments: list, captioned_frames: list, 
             "content": (
                 f"Video: '{video_name}'\n\n"
                 f"=== TRANSCRIPT ===\n{transcript_text}\n\n"
-                f"=== SCREENSHOTS ===\n{frames_summary}\n\n"
+                f"=== SCREENSHOTS AVAILABLE ===\n{frames_summary}\n\n"
                 f"=== TOPICS ===\n{topics_text}\n\n"
-                "Create a structured training document outline with 4-8 logical sections.\n"
+                "Create a structured training document with 4-8 logical sections.\n"
+                "For each section, pick the BEST matching screenshot_timestamp from the screenshots list above.\n"
                 "Respond ONLY with JSON:\n"
                 "{\n"
                 '  "title": "Training document title",\n'
@@ -147,7 +162,7 @@ def write_section_content(section: dict, section_number: int) -> dict:
         {
             "role": "system",
             "content": (
-                "You are an expert technical writer creating step-by-step software training manuals. "
+                "You are an expert technical writer creating step-by-step training manuals. "
                 "Write in clear, direct language with numbered steps."
             ),
         },
@@ -155,7 +170,7 @@ def write_section_content(section: dict, section_number: int) -> dict:
             "role": "user",
             "content": (
                 f"Write training content for Section {section_number}: '{section['title']}'\n\n"
-                f"Objective: {section['objective']}\n"
+                f"Objective: {section.get('objective', '')}\n"
                 f"Transcript: {section.get('transcript_chunk', '')}\n"
                 f"Key actions: {', '.join(section.get('key_actions', []))}\n\n"
                 "Respond ONLY with JSON:\n"
@@ -194,7 +209,6 @@ def write_all_sections(structure: dict) -> dict:
     sections = structure.get("sections", [])
     logger.info(f"Writing content for {len(sections)} sections...")
     for i, section in enumerate(sections):
-        logger.info(f"  Section {i+1}: {section['title']}")
         sections[i] = write_section_content(section, i + 1)
     structure["sections"] = sections
     return structure
@@ -203,11 +217,11 @@ def write_all_sections(structure: dict) -> dict:
 @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=2, max=8))
 def generate_quiz(structure: dict) -> list:
     section_titles = [s["title"] for s in structure.get("sections", [])]
-    takeaways      = []
+    takeaways = []
     for s in structure.get("sections", []):
         takeaways.extend(s.get("content", {}).get("key_takeaways", []))
     messages = [
-        {"role": "system", "content": "You create concise knowledge-check quizzes for software training."},
+        {"role": "system", "content": "You create concise knowledge-check quizzes for training."},
         {
             "role": "user",
             "content": (
