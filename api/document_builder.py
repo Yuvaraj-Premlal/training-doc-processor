@@ -59,9 +59,17 @@ def _add_page_break(doc: Document):
     doc.add_page_break()
 
 
-def _fetch_image_bytes(url: str) -> bytes | None:
-    """Download image from URL, return bytes or None on failure."""
+def _fetch_image_bytes(url: str, blob_client=None) -> bytes | None:
+    """
+    Fetch image bytes. If url is a blob path (no http), fetch from Azure blob storage.
+    Otherwise fetch from URL directly.
+    """
     try:
+        # Blob path saved during captions stage (e.g. "PM/frames/frame_001.jpg")
+        if blob_client and not url.startswith("http"):
+            blob = blob_client.get_blob_client(container="intermediate", blob=url)
+            return blob.download_blob().readall()
+        # Regular URL
         resp = requests.get(url, timeout=20)
         resp.raise_for_status()
         return resp.content
@@ -174,6 +182,7 @@ def _build_section(
     section: dict,
     section_number: int,
     captioned_frames: list[dict],
+    blob_client=None,
 ):
     content = section.get("content", {})
 
@@ -202,7 +211,7 @@ def _build_section(
     screenshot_ts  = section.get("screenshot_timestamp", -1)
     best_frame     = _find_closest_frame(captioned_frames, screenshot_ts)
     if best_frame:
-        img_bytes = _fetch_image_bytes(best_frame["url"])
+        img_bytes = _fetch_image_bytes(best_frame["url"], blob_client=blob_client)
         if img_bytes:
             try:
                 img_stream = io.BytesIO(img_bytes)
@@ -370,6 +379,7 @@ def build_document(
     captioned_frames: list[dict],
     quiz_questions: list[dict],
     output_path: str | None = None,
+    blob_client=None,
 ) -> io.BytesIO:
     """
     Build the complete training document.
@@ -402,7 +412,7 @@ def build_document(
     # Sections
     for i, section in enumerate(sections, 1):
         logger.info(f"  Building section {i}: {section['title']}")
-        _build_section(doc, section, i, captioned_frames)
+        _build_section(doc, section, i, captioned_frames, blob_client=blob_client)
 
     # Quiz
     _build_quiz(doc, quiz_questions)
