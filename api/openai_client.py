@@ -33,9 +33,32 @@ def _chat(messages: list, max_tokens: int = 1500, json_mode: bool = False) -> st
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=10))
 def caption_keyframe(image_url: str, timestamp: float) -> dict:
+    import base64 as _b64
     minutes    = int(timestamp // 60)
     seconds    = int(timestamp % 60)
     time_label = f"{minutes:02d}:{seconds:02d}"
+
+    # Download image and convert to base64
+    # Azure OpenAI Vision cannot access VI URLs directly (auth token required)
+    image_b64 = None
+    try:
+        img_resp   = requests.get(image_url, timeout=20)
+        img_resp.raise_for_status()
+        image_b64  = _b64.b64encode(img_resp.content).decode("utf-8")
+        media_type = img_resp.headers.get("Content-Type", "image/jpeg").split(";")[0]
+    except Exception as dl_err:
+        logger.warning(f"Could not download frame at {time_label}: {dl_err}")
+        return {
+            "caption":    f"Screenshot at {time_label}",
+            "ui_element": "",
+            "user_action": None,
+            "score":      2,
+            "is_useful":  True,
+            "timestamp":  timestamp,
+            "url":        image_url,
+            "raw_bytes":  None,
+        }
+
     messages = [
         {
             "role": "system",
@@ -50,7 +73,13 @@ def caption_keyframe(image_url: str, timestamp: float) -> dict:
         {
             "role": "user",
             "content": [
-                {"type": "image_url", "image_url": {"url": image_url, "detail": "high"}},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{media_type};base64,{image_b64}",
+                        "detail": "high",
+                    },
+                },
                 {
                     "type": "text",
                     "text": (
@@ -73,6 +102,7 @@ def caption_keyframe(image_url: str, timestamp: float) -> dict:
         result = json.loads(raw)
         result["timestamp"] = timestamp
         result["url"]       = image_url
+        result["raw_bytes"] = img_resp.content  # keep bytes for blob save
         return result
     except Exception as e:
         logger.warning(f"Vision caption failed at {time_label}: {e}")
@@ -81,9 +111,10 @@ def caption_keyframe(image_url: str, timestamp: float) -> dict:
             "ui_element": "",
             "user_action": None,
             "score":      2,
-            "is_useful":  True,   # default to useful if caption fails
+            "is_useful":  True,
             "timestamp":  timestamp,
             "url":        image_url,
+            "raw_bytes":  img_resp.content,
         }
 
 
