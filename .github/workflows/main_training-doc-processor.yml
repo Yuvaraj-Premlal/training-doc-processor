@@ -1,7 +1,3 @@
-# Docs for the Azure Functions Deploy action: https://github.com/azure/functions-action
-# More GitHub Actions for Azure: https://github.com/Azure/actions
-# More info on Python, GitHub Actions, and Azure Functions: https://aka.ms/python-webapps-actions
-
 name: Build and deploy Python project to Azure Function App - training-doc-processor
 
 on:
@@ -37,7 +33,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Zip artifact for deployment
-        run: zip release.zip ./* -r
+        run: zip release.zip ./* -r --exclude ".github/*" --exclude "venv/*" --exclude "*.git*"
 
       - name: Upload artifact for deployment job
         uses: actions/upload-artifact@v4
@@ -58,7 +54,6 @@ jobs:
         with:
           name: python-app
 
-      # IMPORTANT: Do NOT unzip. Deploy the zip directly.
       - name: Login to Azure
         uses: azure/login@v2
         with:
