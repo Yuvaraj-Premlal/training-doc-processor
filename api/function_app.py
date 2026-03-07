@@ -298,29 +298,35 @@ def _process_job(blob_client, job_log: dict, account_name: str):
         captioned = []
         for i, kf in enumerate(keyframes):
             logger.info(f"Captioning frame {i+1}/{total} at t={kf.get('timestamp')} source={kf.get('source','?')}")
-            result = oai.caption_keyframe(kf["url"], kf["timestamp"])
+
+            # Step 1: Download image bytes here — single source of truth
+            img_bytes = oai.download_frame(kf["url"])
+            if not img_bytes:
+                logger.warning(f"Skipping frame {i+1} — could not download")
+                continue
+
+            # Step 2: Save to blob immediately so doc builder can fetch it later
+            frame_blob_name = f"{inter_prefix}frames/frame_{i:03d}.jpg"
+            try:
+                frame_blob = blob_client.get_blob_client(
+                    container="intermediate", blob=frame_blob_name
+                )
+                frame_blob.upload_blob(img_bytes, overwrite=True)
+                logger.info(f"Saved frame {i+1} to blob: {frame_blob_name}")
+            except Exception as save_err:
+                logger.warning(f"Could not save frame {i+1} to blob: {save_err}")
+                frame_blob_name = None
+
+            # Step 3: Caption using the same bytes (no re-download)
+            result = oai.caption_keyframe(img_bytes, kf["timestamp"])
             logger.info(f"Frame {i+1} result: score={result.get('score')} is_useful={result.get('is_useful')} caption={result.get('caption','')[:60]}")
 
-            # Save image bytes to blob storage immediately
-            # openai_client already downloaded the image, reuse raw_bytes
-            if result.get("is_useful", False):
-                try:
-                    raw_bytes = result.pop("raw_bytes", None)
-                    if raw_bytes:
-                        frame_blob_name = f"{inter_prefix}frames/frame_{i:03d}.jpg"
-                        frame_blob = blob_client.get_blob_client(
-                            container="intermediate", blob=frame_blob_name
-                        )
-                        frame_blob.upload_blob(raw_bytes, overwrite=True)
-                        result["blob_path"] = frame_blob_name
-                        result["url"]       = frame_blob_name
-                        logger.info(f"Saved frame {i} to blob: {frame_blob_name}")
-                    else:
-                        logger.warning(f"No raw_bytes for frame {i}, image will not be in doc")
-                except Exception as img_err:
-                    logger.warning(f"Could not save frame {i} to blob: {img_err}")
+            # Step 4: Store blob path so doc builder knows where to find it
+            if frame_blob_name:
+                result["blob_path"] = frame_blob_name
+                result["url"]       = frame_blob_name
             else:
-                result.pop("raw_bytes", None)  # discard bytes for non-useful frames
+                result["url"] = kf["url"]  # fallback to original URL
 
             captioned.append(result)
             pct = round(((i + 1) / max(total, 1)) * 100)
@@ -329,9 +335,10 @@ def _process_job(blob_client, job_log: dict, account_name: str):
                 "updated_at":        _now(),
             })
         useful = [f for f in captioned if f.get("is_useful", False)]
-        _save_json(blob_client, inter_prefix, "captions.json", useful)
+        # Save ALL captioned frames so doc builder has maximum choice
+        _save_json(blob_client, inter_prefix, "captions.json", captioned)
         _set_stage(blob_client, inter_prefix, "captions", "done",
-                   f"{len(useful)}/{total} useful frames")
+                   f"{len(useful)}/{len(captioned)} useful frames")
         _update_log(blob_client, inter_prefix, {
             "current_stage":    "structure",
             "captions_progress": "100%",
