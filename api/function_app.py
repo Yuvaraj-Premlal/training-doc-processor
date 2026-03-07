@@ -273,10 +273,31 @@ def _process_job(blob_client, job_log: dict, account_name: str):
         transcript = vi.extract_transcript(index_data)
         keyframes  = vi.extract_keyframes(index_data, video_id)
         topics     = vi.extract_topics(index_data)
+
+        # ── Download thumbnails NOW before deleting video ──────────────
+        # VI thumbnails return 404 once the video is deleted
+        logger.info(f"Downloading {len(keyframes)} thumbnails before deleting video...")
+        for i, kf in enumerate(keyframes):
+            img_bytes = oai.download_frame(kf["url"])
+            if img_bytes:
+                frame_blob_name = f"{inter_prefix}frames/frame_{i:03d}.jpg"
+                try:
+                    fb = blob_client.get_blob_client(container="intermediate", blob=frame_blob_name)
+                    fb.upload_blob(img_bytes, overwrite=True)
+                    keyframes[i]["url"]       = frame_blob_name
+                    keyframes[i]["blob_path"] = frame_blob_name
+                    logger.info(f"Saved thumbnail {i+1}/{len(keyframes)} to blob")
+                except Exception as e:
+                    logger.warning(f"Could not save thumbnail {i}: {e}")
+            else:
+                logger.warning(f"Could not download thumbnail {i}")
+
+        # ── Now safe to delete video from VI ──────────────────────────
+        vi.delete_video(video_id)
+
         _save_json(blob_client, inter_prefix, "transcript.json", transcript)
         _save_json(blob_client, inter_prefix, "keyframes.json",  keyframes)
         _save_json(blob_client, inter_prefix, "topics.json",     topics)
-        vi.delete_video(video_id)
         _set_stage(blob_client, inter_prefix, "indexing", "done",
                    f"{len(transcript)} segments, {len(keyframes)} keyframes")
         _update_log(blob_client, inter_prefix, {
@@ -299,35 +320,24 @@ def _process_job(blob_client, job_log: dict, account_name: str):
         for i, kf in enumerate(keyframes):
             logger.info(f"Captioning frame {i+1}/{total} at t={kf.get('timestamp')} source={kf.get('source','?')}")
 
-            # Step 1: Download image bytes here — single source of truth
-            img_bytes = oai.download_frame(kf["url"])
-            if not img_bytes:
-                logger.warning(f"Skipping frame {i+1} — could not download")
+            # Thumbnails already downloaded to blob during indexing stage
+            blob_path = kf.get("blob_path", "")
+            if not blob_path:
+                logger.warning(f"Skipping frame {i+1} — no blob_path in keyframe")
                 continue
 
-            # Step 2: Save to blob immediately so doc builder can fetch it later
-            frame_blob_name = f"{inter_prefix}frames/frame_{i:03d}.jpg"
             try:
-                frame_blob = blob_client.get_blob_client(
-                    container="intermediate", blob=frame_blob_name
-                )
-                frame_blob.upload_blob(img_bytes, overwrite=True)
-                logger.info(f"Saved frame {i+1} to blob: {frame_blob_name}")
-            except Exception as save_err:
-                logger.warning(f"Could not save frame {i+1} to blob: {save_err}")
-                frame_blob_name = None
+                fb        = blob_client.get_blob_client(container="intermediate", blob=blob_path)
+                img_bytes = fb.download_blob().readall()
+                logger.info(f"Loaded frame {i+1} from blob: {len(img_bytes)} bytes")
+            except Exception as e:
+                logger.warning(f"Skipping frame {i+1} — could not load from blob: {e}")
+                continue
 
-            # Step 3: Caption using the same bytes (no re-download)
             result = oai.caption_keyframe(img_bytes, kf["timestamp"])
             logger.info(f"Frame {i+1} result: score={result.get('score')} is_useful={result.get('is_useful')} caption={result.get('caption','')[:60]}")
-
-            # Step 4: Store blob path so doc builder knows where to find it
-            if frame_blob_name:
-                result["blob_path"] = frame_blob_name
-                result["url"]       = frame_blob_name
-            else:
-                result["url"] = kf["url"]  # fallback to original URL
-
+            result["blob_path"] = blob_path
+            result["url"]       = blob_path
             captioned.append(result)
             pct = round(((i + 1) / max(total, 1)) * 100)
             _update_log(blob_client, inter_prefix, {
