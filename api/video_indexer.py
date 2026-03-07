@@ -58,7 +58,7 @@ def submit_video_from_blob(blob_url: str, video_name: str) -> str:
         "name":           video_name,
         "videoUrl":       blob_url,
         "language":       "auto",
-        "indexingPreset": "Default",
+        "indexingPreset": "Advanced",
         "streamingPreset": "NoStreaming",
     }
     resp = requests.post(url, params=params, timeout=60)
