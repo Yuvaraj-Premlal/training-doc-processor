@@ -182,3 +182,22 @@ def _parse_time(time_str: str) -> float:
         return float(time_str)
     except Exception:
         return 0.0
+
+
+def check_indexing_status(video_id: str) -> tuple:
+    """
+    Returns (state, progress_str, index_data_or_None)
+    state: "Processed" | "Failed" | "Processing" | "Uploaded"
+    progress_str: e.g. "45%"
+    """
+    vi_token, cfg = _get_tokens()
+    url    = f"{VI_BASE}/{cfg['location']}/Accounts/{cfg['account_id']}/Videos/{video_id}/Index"
+    params = {"accessToken": vi_token, "language": "English"}
+    resp   = requests.get(url, params=params, timeout=30)
+    resp.raise_for_status()
+    data     = resp.json()
+    state    = data.get("state", "")
+    progress = data.get("videos", [{}])[0].get("processingProgress", "0%")
+    if state == "Processed":
+        return state, "100%", data
+    return state, progress, None
