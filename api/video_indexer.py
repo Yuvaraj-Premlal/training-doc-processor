@@ -58,7 +58,7 @@ def submit_video_from_blob(blob_url: str, video_name: str) -> str:
         "name":           video_name,
         "videoUrl":       blob_url,
         "language":       "auto",
-        "indexingPreset": "Advanced",
+        "indexingPreset": "Default",
         "streamingPreset": "NoStreaming",
     }
     resp = requests.post(url, params=params, timeout=60)
@@ -108,14 +108,10 @@ def extract_transcript(index_data: dict) -> list:
 
 
 def extract_keyframes(index_data: dict, video_id: str) -> list:
-    """
-    Extract keyframes from Video Indexer shots.
-    Also adds evenly-spaced interval frames to ensure good coverage
-    especially for presentation/slide-style videos.
-    """
+    """Extract keyframes from Video Indexer shots using thumbnailId only."""
     vi_token, cfg = _get_tokens()
     keyframes = []
-    seen_timestamps = set()
+    seen = set()
 
     try:
         shots = (
@@ -123,19 +119,14 @@ def extract_keyframes(index_data: dict, video_id: str) -> list:
             .get("insights", {})
             .get("shots", [])
         )
-
-        # Get VI keyframes from shots
         for shot in shots:
             for kf in shot.get("keyFrames", []):
                 instances    = kf.get("instances", [{}])
                 timestamp    = _parse_time(instances[0].get("adjustedStart", "0:0:0"))
                 thumbnail_id = instances[0].get("thumbnailId", "")
-                if not thumbnail_id:
+                if not thumbnail_id or thumbnail_id in seen:
                     continue
-                t_rounded = round(timestamp)
-                if t_rounded in seen_timestamps:
-                    continue
-                seen_timestamps.add(t_rounded)
+                seen.add(thumbnail_id)
                 thumb_url = (
                     f"{VI_BASE}/{cfg['location']}/Accounts/{cfg['account_id']}"
                     f"/Videos/{video_id}/Thumbnails/{thumbnail_id}"
@@ -147,41 +138,10 @@ def extract_keyframes(index_data: dict, video_id: str) -> list:
                     "url":          thumb_url,
                     "source":       "vi_keyframe",
                 })
-
-        # Get video duration
-        duration = _get_video_duration(index_data)
-        logger.info(f"Video duration: {duration}s, VI keyframes: {len(keyframes)}")
-
-        # Add interval-based thumbnails every 60 seconds for better coverage
-        # This is critical for slide/presentation style videos
-        if duration > 0:
-            interval = 60  # every 60 seconds
-            t = interval
-            while t < duration:
-                t_rounded = round(t)
-                if t_rounded not in seen_timestamps:
-                    seen_timestamps.add(t_rounded)
-                    # Use Video Indexer thumbnail at specific time
-                    thumb_url = (
-                        f"{VI_BASE}/{cfg['location']}/Accounts/{cfg['account_id']}"
-                        f"/Videos/{video_id}/Thumbnails"
-                        f"?accessToken={vi_token}&format=Jpeg&time={t_rounded}"
-                    )
-                    keyframes.append({
-                        "timestamp": float(t),
-                        "thumbnail_id": f"interval_{t_rounded}",
-                        "url":          thumb_url,
-                        "source":       "interval",
-                    })
-                t += interval
-
-        # Sort by timestamp
-        keyframes.sort(key=lambda x: x["timestamp"])
-
     except Exception as e:
         logger.warning(f"Error extracting keyframes: {e}")
 
-    logger.info(f"Total keyframes to caption: {len(keyframes)}")
+    logger.info(f"Total VI keyframes: {len(keyframes)}")
     return keyframes
 
 
