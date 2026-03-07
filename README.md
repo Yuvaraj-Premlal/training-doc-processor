@@ -1,7 +1,7 @@
 # Training Document Processor
 
 Automated Azure pipeline that converts MP4 training videos into structured
-step-by-step training manuals (.docx) with screenshots.- v4
+step-by-step training manuals (.docx) with screenshots.- v5
 
 ## How it works
 
