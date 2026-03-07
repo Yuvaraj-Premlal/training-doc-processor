@@ -292,7 +292,28 @@ def _process_job(blob_client, job_log: dict, account_name: str):
         total     = len(keyframes)
         captioned = []
         for i, kf in enumerate(keyframes):
-            captioned.append(oai.caption_keyframe(kf["url"], kf["timestamp"]))
+            result = oai.caption_keyframe(kf["url"], kf["timestamp"])
+
+            # Download image immediately and save to blob storage
+            # so the URL doesn't expire before doc build
+            if result.get("is_useful", False):
+                try:
+                    import requests as _req
+                    img_resp = _req.get(kf["url"], timeout=20)
+                    if img_resp.status_code == 200:
+                        frame_blob_name = f"{inter_prefix}frames/frame_{i:03d}.jpg"
+                        frame_blob = blob_client.get_blob_client(
+                            container="intermediate", blob=frame_blob_name
+                        )
+                        frame_blob.upload_blob(img_resp.content, overwrite=True)
+                        # Replace expiring VI URL with stable blob URL
+                        result["blob_path"] = frame_blob_name
+                        result["url"]       = frame_blob_name  # mark for local fetch
+                        logger.info(f"Saved frame {i} to blob: {frame_blob_name}")
+                except Exception as img_err:
+                    logger.warning(f"Could not save frame {i} to blob: {img_err}")
+
+            captioned.append(result)
             pct = round(((i + 1) / max(total, 1)) * 100)
             _update_log(blob_client, inter_prefix, {
                 "captions_progress": f"{pct}% ({i+1}/{total} frames)",
@@ -359,7 +380,7 @@ def _process_job(blob_client, job_log: dict, account_name: str):
         structure  = _load_json(blob_client, inter_prefix, "content.json")  or {}
         captions   = _load_json(blob_client, inter_prefix, "captions.json") or []
         quiz       = _load_json(blob_client, inter_prefix, "quiz.json")     or []
-        doc_buffer = db.build_document(structure, captions, quiz)
+        doc_buffer = db.build_document(structure, captions, quiz, blob_client=blob_client)
         _set_stage(blob_client, inter_prefix, "build_doc", "done")
 
         _set_stage(blob_client, inter_prefix, "upload", "running")
