@@ -31,34 +31,27 @@ def _chat(messages: list, max_tokens: int = 1500, json_mode: bool = False) -> st
     return resp.json()["choices"][0]["message"]["content"]
 
 
+def download_frame(image_url: str) -> bytes | None:
+    """Download image bytes from a URL. Returns None on failure."""
+    try:
+        resp = requests.get(image_url, timeout=20)
+        resp.raise_for_status()
+        logger.info(f"Downloaded frame: {len(resp.content)} bytes from {image_url[:80]}")
+        return resp.content
+    except Exception as e:
+        logger.warning(f"Could not download frame: {e}")
+        return None
+
+
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=10))
-def caption_keyframe(image_url: str, timestamp: float) -> dict:
+def caption_keyframe(image_bytes: bytes, timestamp: float) -> dict:
+    """Caption a keyframe given its raw image bytes."""
     import base64 as _b64
     minutes    = int(timestamp // 60)
     seconds    = int(timestamp % 60)
     time_label = f"{minutes:02d}:{seconds:02d}"
 
-    # Download image and convert to base64
-    # Azure OpenAI Vision cannot access VI URLs directly (auth token required)
-    image_b64 = None
-    try:
-        img_resp   = requests.get(image_url, timeout=20)
-        img_resp.raise_for_status()
-        image_b64  = _b64.b64encode(img_resp.content).decode("utf-8")
-        media_type = img_resp.headers.get("Content-Type", "image/jpeg").split(";")[0]
-    except Exception as dl_err:
-        logger.warning(f"Could not download frame at {time_label}: {dl_err}")
-        return {
-            "caption":    f"Screenshot at {time_label}",
-            "ui_element": "",
-            "user_action": None,
-            "score":      2,
-            "is_useful":  True,
-            "timestamp":  timestamp,
-            "url":        image_url,
-            "raw_bytes":  None,
-        }
-
+    image_b64  = _b64.b64encode(image_bytes).decode("utf-8")
     messages = [
         {
             "role": "system",
@@ -76,7 +69,7 @@ def caption_keyframe(image_url: str, timestamp: float) -> dict:
                 {
                     "type": "image_url",
                     "image_url": {
-                        "url": f"data:{media_type};base64,{image_b64}",
+                        "url": f"data:image/jpeg;base64,{image_b64}",
                         "detail": "high",
                     },
                 },
@@ -101,8 +94,6 @@ def caption_keyframe(image_url: str, timestamp: float) -> dict:
         raw    = _chat(messages, max_tokens=300, json_mode=True)
         result = json.loads(raw)
         result["timestamp"] = timestamp
-        result["url"]       = image_url
-        result["raw_bytes"] = img_resp.content  # keep bytes for blob save
         return result
     except Exception as e:
         logger.warning(f"Vision caption failed at {time_label}: {e}")
@@ -113,8 +104,6 @@ def caption_keyframe(image_url: str, timestamp: float) -> dict:
             "score":      2,
             "is_useful":  True,
             "timestamp":  timestamp,
-            "url":        image_url,
-            "raw_bytes":  img_resp.content,
         }
 
 
