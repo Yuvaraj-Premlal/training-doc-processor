@@ -59,7 +59,7 @@ def submit_video_from_blob(blob_url: str, video_name: str) -> str:
         "videoUrl":       blob_url,
         "language":       "auto",
         "indexingPreset": "Default",
-        "streamingPreset":"NoStreaming",
+        "streamingPreset": "NoStreaming",
     }
     resp = requests.post(url, params=params, timeout=60)
     resp.raise_for_status()
@@ -68,27 +68,22 @@ def submit_video_from_blob(blob_url: str, video_name: str) -> str:
     return video_id
 
 
-def wait_for_indexing(video_id: str, poll_interval: int = 30, max_wait: int = 3600) -> dict:
+def check_indexing_status(video_id: str) -> tuple:
+    """
+    Returns (state, progress_str, index_data_or_None)
+    state: "Processed" | "Failed" | "Processing" | "Uploaded"
+    """
     vi_token, cfg = _get_tokens()
-    url     = f"{VI_BASE}/{cfg['location']}/Accounts/{cfg['account_id']}/Videos/{video_id}/Index"
-    elapsed = 0
-    while elapsed < max_wait:
-        params = {"accessToken": vi_token, "language": "English"}
-        resp   = requests.get(url, params=params, timeout=30)
-        resp.raise_for_status()
-        data     = resp.json()
-        state    = data.get("state", "")
-        progress = data.get("videos", [{}])[0].get("processingProgress", "0%")
-        logger.info(f"Video Indexer state={state} progress={progress}")
-        if state == "Processed":
-            return data
-        elif state == "Failed":
-            raise RuntimeError(f"Video Indexer failed for video_id={video_id}")
-        if elapsed % 600 == 0 and elapsed > 0:
-            vi_token, cfg = _get_tokens()
-        time.sleep(poll_interval)
-        elapsed += poll_interval
-    raise TimeoutError(f"Video Indexer timed out after {max_wait}s")
+    url    = f"{VI_BASE}/{cfg['location']}/Accounts/{cfg['account_id']}/Videos/{video_id}/Index"
+    params = {"accessToken": vi_token, "language": "English"}
+    resp   = requests.get(url, params=params, timeout=30)
+    resp.raise_for_status()
+    data     = resp.json()
+    state    = data.get("state", "")
+    progress = data.get("videos", [{}])[0].get("processingProgress", "0%")
+    if state == "Processed":
+        return state, "100%", data
+    return state, progress, None
 
 
 def extract_transcript(index_data: dict) -> list:
@@ -113,14 +108,23 @@ def extract_transcript(index_data: dict) -> list:
 
 
 def extract_keyframes(index_data: dict, video_id: str) -> list:
+    """
+    Extract keyframes from Video Indexer shots.
+    Also adds evenly-spaced interval frames to ensure good coverage
+    especially for presentation/slide-style videos.
+    """
     vi_token, cfg = _get_tokens()
     keyframes = []
+    seen_timestamps = set()
+
     try:
         shots = (
             index_data.get("videos", [{}])[0]
             .get("insights", {})
             .get("shots", [])
         )
+
+        # Get VI keyframes from shots
         for shot in shots:
             for kf in shot.get("keyFrames", []):
                 instances    = kf.get("instances", [{}])
@@ -128,16 +132,69 @@ def extract_keyframes(index_data: dict, video_id: str) -> list:
                 thumbnail_id = instances[0].get("thumbnailId", "")
                 if not thumbnail_id:
                     continue
+                t_rounded = round(timestamp)
+                if t_rounded in seen_timestamps:
+                    continue
+                seen_timestamps.add(t_rounded)
                 thumb_url = (
                     f"{VI_BASE}/{cfg['location']}/Accounts/{cfg['account_id']}"
                     f"/Videos/{video_id}/Thumbnails/{thumbnail_id}"
                     f"?accessToken={vi_token}&format=Jpeg"
                 )
-                keyframes.append({"timestamp": timestamp, "thumbnail_id": thumbnail_id, "url": thumb_url})
+                keyframes.append({
+                    "timestamp":    timestamp,
+                    "thumbnail_id": thumbnail_id,
+                    "url":          thumb_url,
+                    "source":       "vi_keyframe",
+                })
+
+        # Get video duration
+        duration = _get_video_duration(index_data)
+        logger.info(f"Video duration: {duration}s, VI keyframes: {len(keyframes)}")
+
+        # Add interval-based thumbnails every 60 seconds for better coverage
+        # This is critical for slide/presentation style videos
+        if duration > 0:
+            interval = 60  # every 60 seconds
+            t = interval
+            while t < duration:
+                t_rounded = round(t)
+                if t_rounded not in seen_timestamps:
+                    seen_timestamps.add(t_rounded)
+                    # Use Video Indexer thumbnail at specific time
+                    thumb_url = (
+                        f"{VI_BASE}/{cfg['location']}/Accounts/{cfg['account_id']}"
+                        f"/Videos/{video_id}/Thumbnails"
+                        f"?accessToken={vi_token}&format=Jpeg&time={t_rounded}"
+                    )
+                    keyframes.append({
+                        "timestamp": float(t),
+                        "thumbnail_id": f"interval_{t_rounded}",
+                        "url":          thumb_url,
+                        "source":       "interval",
+                    })
+                t += interval
+
+        # Sort by timestamp
+        keyframes.sort(key=lambda x: x["timestamp"])
+
     except Exception as e:
         logger.warning(f"Error extracting keyframes: {e}")
-    logger.info(f"Extracted {len(keyframes)} keyframes.")
+
+    logger.info(f"Total keyframes to caption: {len(keyframes)}")
     return keyframes
+
+
+def _get_video_duration(index_data: dict) -> float:
+    try:
+        duration_str = (
+            index_data.get("videos", [{}])[0]
+            .get("insights", {})
+            .get("duration", "0:0:0")
+        )
+        return _parse_time(duration_str)
+    except Exception:
+        return 0.0
 
 
 def extract_topics(index_data: dict) -> list:
@@ -172,7 +229,7 @@ def delete_video(video_id: str):
 
 def _parse_time(time_str: str) -> float:
     try:
-        parts = time_str.split(":")
+        parts = str(time_str).split(":")
         if len(parts) == 3:
             h, m, s = parts
             return int(h) * 3600 + int(m) * 60 + float(s)
@@ -182,22 +239,3 @@ def _parse_time(time_str: str) -> float:
         return float(time_str)
     except Exception:
         return 0.0
-
-
-def check_indexing_status(video_id: str) -> tuple:
-    """
-    Returns (state, progress_str, index_data_or_None)
-    state: "Processed" | "Failed" | "Processing" | "Uploaded"
-    progress_str: e.g. "45%"
-    """
-    vi_token, cfg = _get_tokens()
-    url    = f"{VI_BASE}/{cfg['location']}/Accounts/{cfg['account_id']}/Videos/{video_id}/Index"
-    params = {"accessToken": vi_token, "language": "English"}
-    resp   = requests.get(url, params=params, timeout=30)
-    resp.raise_for_status()
-    data     = resp.json()
-    state    = data.get("state", "")
-    progress = data.get("videos", [{}])[0].get("processingProgress", "0%")
-    if state == "Processed":
-        return state, "100%", data
-    return state, progress, None
