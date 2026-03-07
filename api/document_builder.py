@@ -211,7 +211,9 @@ def _build_section(
     screenshot_ts  = section.get("screenshot_timestamp", -1)
     best_frame     = _find_closest_frame(captioned_frames, screenshot_ts)
     if best_frame:
+        logger.info(f"Section {section_number}: best_frame url={best_frame.get('url','none')[:80]}")
         img_bytes = _fetch_image_bytes(best_frame["url"], blob_client=blob_client)
+        logger.info(f"Section {section_number}: img_bytes size={len(img_bytes) if img_bytes else 0}")
         if img_bytes:
             try:
                 img_stream = io.BytesIO(img_bytes)
@@ -230,8 +232,12 @@ def _build_section(
                 cap_run.font.italic = True
                 cap_run.font.color.rgb = DARK_GREY
                 doc.add_paragraph()
+                logger.info(f"Section {section_number}: screenshot inserted ✅")
             except Exception as e:
-                logger.warning(f"Could not insert screenshot: {e}")
+                import traceback
+                logger.warning(f"Could not insert screenshot: {type(e).__name__}: {e} | {traceback.format_exc()[-200:]}")
+        else:
+            logger.warning(f"Section {section_number}: img_bytes is None — skipping screenshot")
 
     # ── Introduction ──────────────────────────────────────
     intro = content.get("introduction", "")
