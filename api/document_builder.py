@@ -216,7 +216,12 @@ def _build_section(
         logger.info(f"Section {section_number}: img_bytes size={len(img_bytes) if img_bytes else 0}")
         if img_bytes:
             try:
-                img_stream = io.BytesIO(img_bytes)
+                # Normalize image format using Pillow to ensure python-docx compatibility
+                from PIL import Image as PilImage
+                pil_img    = PilImage.open(io.BytesIO(img_bytes)).convert("RGB")
+                img_stream = io.BytesIO()
+                pil_img.save(img_stream, format="JPEG", quality=85)
+                img_stream.seek(0)
                 p_img = doc.add_paragraph()
                 p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 run = p_img.add_run()
